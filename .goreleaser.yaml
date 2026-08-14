@@ -1,0 +1,121 @@
+version: 2
+
+project_name: spillway
+
+before:
+  hooks:
+    # Not "go mod tidy": a release must build what is committed, not quietly
+    # rewrite go.mod on the way past.
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: spillway
+    main: ./cmd/spillway
+    binary: spillway
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/mrueg/spillway/pkg/version.Version={{ .Version }}
+    # With -trimpath, a fixed timestamp is what is left to make the build
+    # byte-for-byte reproducible from a given commit.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+kos:
+  - id: spillway
+    build: spillway
+    base_image: gcr.io/distroless/static:nonroot
+    repositories:
+      - ghcr.io/mrueg/spillway
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Version }}"
+      # Prereleases must not move latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    # bare: the image is exactly the repository above, with no Go import path
+    # appended to it.
+    bare: true
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: Serve Kubernetes API groups out of kcp instead of the cluster's own apiserver
+      org.opencontainers.image.url: https://github.com/mrueg/spillway
+      # ghcr links the package to the repository through this label.
+      org.opencontainers.image.source: https://github.com/mrueg/spillway
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+archives:
+  - id: spillway
+    ids:
+      - spillway
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# ko already attaches an SBOM to the image it builds, so this covers the
+# artifacts it does not: the release archives.
+sboms:
+  - id: archives
+    artifacts: archive
+
+# Keyless signing: the workflow's id-token permission is exchanged with Sigstore
+# for a short-lived certificate, which is what removes the need for a stored
+# private key.
+#
+# Only checksums.txt is signed, and that is deliberate -- it lists the hash of
+# every archive, so one signature covers them all.
+#
+# These args are correct for cosign v3, which replaced sign-blob's
+# --output-signature and --output-certificate with a single --bundle. The
+# workflow pins the cosign version to match; bump the two together.
+signs:
+  - id: checksum
+    cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "--yes"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
+
+# The image is signed where it is published, so consumers can verify what they
+# pull rather than only what they download.
+docker_signs:
+  - id: images
+    cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "--yes"
+      - "${artifact}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+release:
+  prerelease: auto
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

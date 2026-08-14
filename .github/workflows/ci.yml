@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Least privilege: nothing in CI needs to write to the repository.
+permissions:
+  contents: read
+
+# Superseded pushes to the same ref cancel their in-flight runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOLANGCI_LINT_VERSION: v2.12.2
+
+jobs:
+  hygiene:
+    name: Format & Tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go mod tidy
+        run: make tidy-check
+
+      # Both tag sets: the e2e suite is behind a build tag and would otherwise
+      # never be vetted.
+      - name: go vet
+        run: make vet
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # Config lives in .golangci.yml; the version is pinned so a new
+      # golangci-lint release cannot red-CI an unrelated pull request.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  unit-test:
+    name: Unit Tests (race + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # -race matters here: the kcp resource cache is replaced by a refresh loop
+      # while discovery requests read it.
+      - name: Run unit tests
+        run: make cover
+
+      # Always visible, needs nothing configured: the totals land on the run's
+      # own summary page, rather than in an artifact nobody opens.
+      - name: Report coverage
+        # always(), so a failing test run still reports what it did cover — but
+        # only if the profile exists, or this step fails on top of the failure
+        # that actually matters.
+        if: always()
+        run: |
+          if [ ! -s coverage.out ]; then
+            echo "no coverage profile was produced" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+            echo
+            echo '<details><summary>Per function</summary>'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # govulncheck reports only vulnerabilities that are actually reachable
+      # from this code, so a finding here is a call path worth looking at rather
+      # than a version-range match in a dependency nobody calls.
+      - name: Run govulncheck
+        run: make vulncheck
+
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # goreleaser derives the version from git history and tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # A broken .goreleaser.yaml would otherwise surface for the first time
+      # when a tag is pushed, which is the worst place to find out.
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          args: check
+
+  e2e:
+    name: E2E (kind + kcp)
+    runs-on: ubuntu-latest
+    # Provisioning a kind cluster, starting kcp, and building the image with
+    # goreleaser dominates this; the assertions themselves take seconds.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # hack/e2e.sh builds the image with goreleaser, which needs history.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # kind is installed from source rather than via a third-party action: the
+      # harness drives kind itself, so all CI needs is the binary on PATH.
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          install-only: true
+
+      # Pre-pull so the harness is not racing a cold pull while waiting for kcp
+      # to report live.
+      - name: Pre-pull kcp image
+        run: docker pull ghcr.io/kcp-dev/kcp:v0.32.3
+
+      - name: Run e2e suite
+        run: make e2e
+
+      # The failure that matters is usually in the deployed server, not in the
+      # test output.
+      - name: Dump spillway logs
+        if: failure()
+        run: |
+          kubectl --kubeconfig .e2e/kind.kubeconfig -n spillway-system \
+            logs -l app=spillway --tail=200 || true
+          kubectl --kubeconfig .e2e/kind.kubeconfig \
+            get apiservice v1alpha1.spillway.example.com -o yaml || true
+          docker logs --tail 100 spillway-e2e-kcp || true
+
+      - name: Tear down
+        if: always()
+        run: make e2e-down
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binary
+        run: make build
