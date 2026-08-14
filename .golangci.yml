@@ -1,0 +1,48 @@
+version: "2"
+
+run:
+  # Without this the e2e suite is invisible to the linter: it is behind a build
+  # tag, and unlinted test code is where sloppiness accumulates.
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    # Response bodies that are never closed leak connections to kcp, which is
+    # exactly the failure this proxy would be blamed for.
+    - bodyclose
+    # errors.Is/As rather than == and type assertions, so wrapped API errors
+    # keep matching.
+    - errorlint
+    - misspell
+    - unconvert
+    - usestdlibvars
+    # Context should be passed, not stored or dropped.
+    - noctx
+    - nilerr
+  settings:
+    errcheck:
+      # Writing to an http.ResponseWriter can fail when the client goes away;
+      # there is nothing useful to do about it, and the alternative is noise at
+      # every response.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+  exclusions:
+    generated: lax
+    rules:
+      # Test helpers deliberately ignore errors on cleanup paths.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/mrueg/spillway

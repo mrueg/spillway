@@ -1,0 +1,5 @@
+/bin/
+/dist/
+/.e2e/
+*.test
+*.out
