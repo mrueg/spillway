@@ -1,0 +1,58 @@
+# A deliberately ordinary CRD. Nothing here is spillway specific -- the point of
+# the e2e is that a resource you would normally install into the cluster works
+# just the same when its storage lives in a kcp workspace.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.spillway.example.com
+spec:
+  group: spillway.example.com
+  names:
+    kind: Widget
+    listKind: WidgetList
+    plural: widgets
+    singular: widget
+    shortNames:
+      - wdg
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Color
+          type: string
+          jsonPath: .spec.color
+        - name: Size
+          type: integer
+          jsonPath: .spec.size
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - color
+              properties:
+                color:
+                  type: string
+                  enum:
+                    - red
+                    - green
+                    - blue
+                size:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 1
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string

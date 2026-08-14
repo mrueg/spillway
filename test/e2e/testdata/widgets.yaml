@@ -1,0 +1,26 @@
+apiVersion: spillway.example.com/v1alpha1
+kind: Widget
+metadata:
+  name: red-widget
+  namespace: default
+spec:
+  color: red
+  size: 7
+---
+apiVersion: spillway.example.com/v1alpha1
+kind: Widget
+metadata:
+  name: blue-widget
+  namespace: default
+spec:
+  color: blue
+  size: 42
+---
+# Exercises the schema default: size is omitted and should come back as 1.
+apiVersion: spillway.example.com/v1alpha1
+kind: Widget
+metadata:
+  name: green-widget
+  namespace: default
+spec:
+  color: green
