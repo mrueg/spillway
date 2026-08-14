@@ -1,0 +1,252 @@
+# Deploys spillway as an aggregated API server for a single API group.
+#
+# Substitute before applying:
+#   ${SPILLWAY_IMAGE}  image reference
+#   ${SPILLWAY_GROUP}  API group to serve, e.g. widgets.example.com
+#
+# The kcp credentials are expected in a secret named spillway-kcp-kubeconfig,
+# key "kubeconfig", whose server URL addresses the workspace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spillway-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spillway
+  namespace: spillway-system
+---
+# Lets spillway run TokenReview and SubjectAccessReview against this cluster, so
+# callers are authenticated and authorized by the cluster's own RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spillway-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: spillway
+    namespace: spillway-system
+---
+# Lets spillway read the requestheader CA that the aggregation layer signs its
+# client certificates with; without it every proxied request is unauthenticated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spillway-extension-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: spillway
+    namespace: spillway-system
+---
+# The generic apiserver machinery runs shared informers for admission, priority
+# and fairness, and namespace lifecycle. Without these reads the informers never
+# sync and the server never becomes ready.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spillway
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+      - mutatingadmissionpolicies
+      - mutatingadmissionpolicybindings
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["flowcontrol.apiserver.k8s.io"]
+    resources: ["flowschemas", "prioritylevelconfigurations"]
+    verbs: ["get", "list", "watch"]
+  # --register-apiservices below. Spillway maintains an APIService for every
+  # group version the workspace serves, and only ever removes ones it created
+  # itself, so the APIService at the bottom of this file stays as written.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# Only one replica maintains those APIServices. The registrations are the same
+# from every replica and converge whoever writes them, so this is not about
+# correctness: it is that two replicas reconciling the same objects means twice
+# the writes and twice the conflicts to retry. Serving needs no leader and is
+# unaffected.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spillway-leader-election
+  namespace: spillway-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spillway-leader-election
+  namespace: spillway-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spillway-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: spillway
+    namespace: spillway-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spillway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spillway
+subjects:
+  - kind: ServiceAccount
+    name: spillway
+    namespace: spillway-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spillway
+  namespace: spillway-system
+  labels:
+    app: spillway
+spec:
+  # Spillway holds no state, so replicas are free. Two matter here: a failing
+  # APIService degrades discovery for the whole cluster, so a single pod being
+  # rescheduled is felt well beyond the offloaded group.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spillway
+  template:
+    metadata:
+      labels:
+        app: spillway
+    spec:
+      serviceAccountName: spillway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: spillway
+          image: ${SPILLWAY_IMAGE}
+          args:
+            - --kcp-kubeconfig=/etc/spillway/kcp/kubeconfig
+            # An exact group. A domain wildcard such as *.example.com would
+            # serve every group under it the workspace has now or gains later,
+            # without editing this file and restarting.
+            - --api-group=${SPILLWAY_GROUP}
+            # A version added to the workspace after this file was written gets
+            # an APIService without anyone editing anything; one the workspace
+            # stops serving has its APIService withdrawn, rather than being left
+            # to fail the availability probe and degrade discovery cluster wide.
+            - --register-apiservices
+            # Spillway serves a certificate it generates at startup, so there is
+            # no authority for the aggregation layer to verify it against. Give
+            # it a real certificate and --apiservice-ca-bundle-file instead.
+            - --apiservice-insecure-skip-tls-verify
+            - --apiservice-service-name=spillway
+            - --apiservice-service-namespace=spillway-system
+            - --secure-port=6443
+            - --cert-dir=/tmp/certs
+            - --v=2
+          ports:
+            - name: https
+              containerPort: 6443
+          volumeMounts:
+            - name: kcp-kubeconfig
+              mountPath: /etc/spillway/kcp
+              readOnly: true
+            - name: certs
+              mountPath: /tmp/certs
+          livenessProbe:
+            httpGet: {path: /livez, port: https, scheme: HTTPS}
+            initialDelaySeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: {path: /readyz, port: https, scheme: HTTPS}
+            initialDelaySeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # Memory only. A CPU limit would throttle the proxy under exactly
+              # the load it exists to absorb, and turn a busy kcp into a slow
+              # APIService.
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: kcp-kubeconfig
+          secret:
+            secretName: spillway-kcp-kubeconfig
+        - name: certs
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: spillway
+  namespace: spillway-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: spillway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spillway
+  namespace: spillway-system
+spec:
+  selector:
+    app: spillway
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+# Declared here as well as registered by spillway, so the group is served from
+# the moment this file is applied rather than from spillway's first sync.
+# Spillway leaves it alone: it carries no managed-by label, so it is not one of
+# the APIServices spillway considers its own.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.${SPILLWAY_GROUP}
+spec:
+  group: ${SPILLWAY_GROUP}
+  version: v1alpha1
+  service:
+    name: spillway
+    namespace: spillway-system
+    port: 443
+  # Spillway serves a self-signed certificate generated at startup. Production
+  # deployments should supply a real certificate and set caBundle instead.
+  insecureSkipTLSVerify: true
+  groupPriorityMinimum: 1000
+  versionPriority: 15

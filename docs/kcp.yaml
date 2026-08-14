@@ -1,0 +1,92 @@
+# kcp running inside the cluster, for the getting started tutorial.
+#
+# This is a demo topology, not a production one: storage is an emptyDir, so the
+# workspace and everything in it is lost when the pod restarts. A real
+# deployment gives kcp persistent storage, and usually its own cluster.
+#
+# kcp is given a serving certificate rather than generating its own. It has no
+# --external-hostname flag, so the certificate it would generate covers its pod
+# IP and localhost -- neither of which is the Service name spillway connects to.
+# The certificate created in the tutorial covers the Service name and localhost,
+# so both spillway and a port-forward from your laptop can verify it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kcp
+  namespace: kcp
+  labels:
+    app: kcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kcp
+  template:
+    metadata:
+      labels:
+        app: kcp
+    spec:
+      securityContext:
+        # The image runs as 65532, and kcp writes its certificates and its
+        # embedded etcd into the volume, so the volume has to belong to it.
+        runAsNonRoot: true
+        fsGroup: 65532
+      containers:
+        - name: kcp
+          image: ghcr.io/kcp-dev/kcp:v0.32.3
+          args:
+            - start
+            - --root-directory=/data
+            - --tls-cert-file=/etc/kcp/tls/tls.crt
+            - --tls-private-key-file=/etc/kcp/tls/tls.key
+          ports:
+            - name: https
+              containerPort: 6443
+          volumeMounts:
+            - name: data
+              # Not /kcp: that is where the kcp binary itself lives in this
+              # image, and a volume mounted over it replaces the entrypoint.
+              mountPath: /data
+            - name: serving
+              mountPath: /etc/kcp/tls
+              readOnly: true
+          readinessProbe:
+            # /readyz rather than a TCP check: kcp opens its port well before it
+            # has finished bootstrapping, so a TCP probe reports ready while
+            # requests still fail. It answers health probes unauthenticated,
+            # as kube-apiserver does.
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: serving
+          secret:
+            secretName: kcp-serving
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kcp
+  namespace: kcp
+spec:
+  selector:
+    app: kcp
+  ports:
+    - name: https
+      port: 6443
+      targetPort: https

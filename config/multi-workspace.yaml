@@ -1,0 +1,130 @@
+# Serving from more than one kcp workspace.
+#
+# config/spillway.yaml describes one workspace, configured by --kcp-kubeconfig
+# and --api-group. This is the other shape: a file listing several, each with
+# its own credentials and its own groups. Apply spillway.yaml first, then this,
+# then the patch at the bottom.
+#
+# The two things worth knowing before copying it:
+#
+#   * The ConfigMap is mounted as a directory, not with subPath. A subPath mount
+#     is never updated when the ConfigMap changes, so the file inside the pod
+#     would stay as it was and spillway would keep serving the configuration it
+#     started with -- silently, since it re-reads the file it can see.
+#
+#   * A group comes from exactly one workspace. Two workspaces naming one group
+#     outright is refused at startup; where wildcards overlap, the first
+#     workspace listed wins.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spillway-workspaces
+  namespace: spillway-system
+type: Opaque
+stringData:
+  # One kubeconfig per workspace, named as the file refers to them. Each one's
+  # server URL must address its workspace, as --kcp-kubeconfig's does:
+  # https://kcp.example:6443/clusters/root:team-a
+  #
+  # Replace both of these. They are here to show the shape, and spillway will
+  # refuse to start rather than serve from a workspace it cannot reach.
+  team-a: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: kcp
+        cluster:
+          server: https://kcp.kcp.svc:6443/clusters/root:team-a
+          certificate-authority-data: REPLACE_ME
+    users:
+      - name: spillway
+        user:
+          token: REPLACE_ME
+    contexts:
+      - name: kcp
+        context: {cluster: kcp, user: spillway}
+    current-context: kcp
+  team-b: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: kcp
+        cluster:
+          server: https://kcp.kcp.svc:6443/clusters/root:team-b
+          certificate-authority-data: REPLACE_ME
+    users:
+      - name: spillway
+        user:
+          token: REPLACE_ME
+    contexts:
+      - name: kcp
+        context: {cluster: kcp, user: spillway}
+    current-context: kcp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spillway-workspaces
+  namespace: spillway-system
+data:
+  workspaces.yaml: |
+    workspaces:
+      - name: team-a
+        kubeconfig: /etc/spillway/workspaces/team-a
+        # Every group under the domain that this workspace has or gains, except
+        # one that should stay in the cluster.
+        apiGroups: ["*.team-a.example.com", "!internal.team-a.example.com"]
+      - name: team-b
+        kubeconfig: /etc/spillway/workspaces/team-b
+        apiGroups: ["widgets.example.com"]
+        # Anything a workspace does not set is inherited from the flags. One kcp
+        # being slow is a fact about that kcp rather than about the others.
+        requestTimeout: 60s
+        retries: 3
+        failureThreshold: 10
+        circuitCooldown: 30s
+        # Forward the caller's identity to this workspace, so its own RBAC
+        # applies on top of the cluster's. Requires spillway's identity there to
+        # hold impersonate permissions.
+        impersonateUsers: false
+# Then point the Deployment at the file. As a patch rather than a second copy of
+# the Deployment, so there is one manifest to keep current:
+#
+#   kubectl -n spillway-system patch deployment spillway --patch-file - <<'EOF'
+#   spec:
+#     template:
+#       spec:
+#         containers:
+#           - name: spillway
+#             args:
+#               - --workspaces-file=/etc/spillway/config/workspaces.yaml
+#               - --register-apiservices
+#               - --apiservice-insecure-skip-tls-verify
+#               - --apiservice-service-name=spillway
+#               - --apiservice-service-namespace=spillway-system
+#               - --secure-port=6443
+#               - --cert-dir=/tmp/certs
+#               - --v=2
+#             volumeMounts:
+#               - name: workspaces
+#                 mountPath: /etc/spillway/workspaces
+#                 readOnly: true
+#               - name: workspaces-file
+#                 mountPath: /etc/spillway/config
+#                 readOnly: true
+#         volumes:
+#           - name: workspaces
+#             secret:
+#               secretName: spillway-workspaces
+#           - name: workspaces-file
+#             configMap:
+#               name: spillway-workspaces
+#   EOF
+#
+# --workspaces-file replaces --kcp-kubeconfig and --api-group; giving both is
+# refused, since it would be two answers to the same question. The args are
+# listed in full because a strategic merge replaces the list rather than adding
+# to it.
+#
+# An APIService is needed for each group, unless --register-apiservices is set
+# as it is above, in which case spillway maintains them itself.
