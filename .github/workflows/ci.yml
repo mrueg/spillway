@@ -144,7 +144,7 @@ jobs:
 
       # A broken .goreleaser.yaml would otherwise surface for the first time
       # when a tag is pushed, which is the worst place to find out.
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
           args: check
 
@@ -169,7 +169,7 @@ jobs:
       - name: Install kind
         run: go install sigs.k8s.io/kind@v0.32.0
 
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
           install-only: true
 
