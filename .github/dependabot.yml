@@ -4,7 +4,37 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      opentelemetry:
+        patterns:
+          - "go.opentelemetry.io/*"
+      grpc:
+        patterns:
+          - "google.golang.org/grpc"
+          - "google.golang.org/genproto/*"
+          - "google.golang.org/protobuf"
+          - "github.com/grpc-ecosystem/*"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+      etcd:
+        patterns:
+          - "go.etcd.io/etcd/*"
+      prometheus:
+        patterns:
+          - "github.com/prometheus/*"
+      spf13:
+        patterns:
+          - "github.com/spf13/*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
