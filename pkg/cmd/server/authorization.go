@@ -122,17 +122,23 @@ func (o *SpillwayServerOptions) applyAuthorization(config *genericapiserver.Reco
 // of its members would answer differently, and refusing to start beats starting
 // with an authorizer that is not the one the flags describe.
 func buildAuthorizer(options *genericoptions.DelegatingAuthorizationOptions, client kubernetes.Interface) (authorizer.Authorizer, error) {
-	var authorizers []authorizer.Authorizer
+	var authorizers []union.NamedAuthorizer
 
 	if len(options.AlwaysAllowGroups) > 0 {
-		authorizers = append(authorizers, authorizerfactory.NewPrivilegedGroups(options.AlwaysAllowGroups...))
+		authorizers = append(authorizers, union.NamedAuthorizer{
+			AuthorizerName: "kubernetes.io/always-allow-groups",
+			Authorizer:     authorizerfactory.NewPrivilegedGroups(options.AlwaysAllowGroups...),
+		})
 	}
 	if len(options.AlwaysAllowPaths) > 0 {
 		allowed, err := path.NewAuthorizer(options.AlwaysAllowPaths)
 		if err != nil {
 			return nil, fmt.Errorf("building the always-allow path authorizer: %w", err)
 		}
-		authorizers = append(authorizers, allowed)
+		authorizers = append(authorizers, union.NamedAuthorizer{
+			AuthorizerName: "kubernetes.io/always-allow-paths",
+			Authorizer:     allowed,
+		})
 	}
 
 	delegated, err := (authorizerfactory.DelegatingAuthorizerConfig{
@@ -144,7 +150,10 @@ func buildAuthorizer(options *genericoptions.DelegatingAuthorizationOptions, cli
 	if err != nil {
 		return nil, fmt.Errorf("building the delegated authorizer: %w", err)
 	}
-	authorizers = append(authorizers, delegated)
+	authorizers = append(authorizers, union.NamedAuthorizer{
+		AuthorizerName: "kubernetes.io/webhook",
+		Authorizer:     delegated,
+	})
 
-	return union.New(authorizers...), nil
+	return union.New(authorizers...)
 }
