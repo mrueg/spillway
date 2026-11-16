@@ -43,6 +43,23 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m warn\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
+# kind_load loads a local docker image into the kind cluster. With Docker's
+# containerd image store, a pulled multi-arch image only has the host platform's
+# layers, but "kind load docker-image" imports with --all-platforms and fails on
+# the missing blobs. Saving just the host platform to an archive avoids that.
+kind_load() {
+  local image="$1" archive
+  archive="$(mktemp "${ARTIFACT_DIR}/image-XXXXXX.tar")"
+  if docker save --help 2>/dev/null | grep -q -- '--platform'; then
+    docker save --platform "linux/$(docker version --format '{{.Server.Arch}}')" \
+      -o "${archive}" "${image}"
+  else
+    docker save -o "${archive}" "${image}"
+  fi
+  kind load image-archive --name "${CLUSTER_NAME}" "${archive}" >/dev/null
+  rm -f "${archive}"
+}
+
 require() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"
 }
@@ -87,7 +104,7 @@ up_kind() {
   # not depend on the cluster being able to pull from a registry.
   log "loading ${CURL_IMAGE} into the cluster"
   docker image inspect "${CURL_IMAGE}" >/dev/null 2>&1 || docker pull "${CURL_IMAGE}" >/dev/null
-  kind load docker-image --name "${CLUSTER_NAME}" "${CURL_IMAGE}" >/dev/null
+  kind_load "${CURL_IMAGE}"
 }
 
 up_kcp() {
@@ -216,7 +233,7 @@ deploy_spillway() {
   log "built ${image}"
 
   log "loading the image into the cluster"
-  kind load docker-image --name "${CLUSTER_NAME}" "${image}" >/dev/null
+  kind_load "${image}"
 
   kubectl --kubeconfig "${KIND_KUBECONFIG}" create namespace spillway-system \
     --dry-run=client -o yaml | kubectl --kubeconfig "${KIND_KUBECONFIG}" apply -f - >/dev/null
