@@ -1,6 +1,6 @@
 module github.com/mrueg/spillway
 
-go 1.26.9
+go 1.27.4
 
 require (
 	github.com/spf13/cobra v1.10.2
